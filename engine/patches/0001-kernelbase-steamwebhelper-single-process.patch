@@ -1,0 +1,65 @@
+--- a/dlls/kernelbase/process.c	2026-11-09 00:58:24
++++ b/dlls/kernelbase/process.c	2026-11-09 00:58:24
+@@ -503,6 +503,45 @@
+ /**********************************************************************
+  *           CreateProcessInternalW   (kernelbase.@)
+  */
++/* Bodega hack: Steam's web helper (Chromium) only draws its window on macOS with Wine 11 when
++ * its browser runs in a single process; frames presented from another process never reach the
++ * window (same symptom as Wine bug 56014). Only the top-level process is changed (children carry --type=).
++ * BODEGA_STEAMWEBHELPER_ARGS overrides the switches; an empty value disables the hack. */
++static WCHAR *bodega_steamwebhelper_cmdline( const WCHAR *app_name, const WCHAR *cmd_line )
++{
++    WCHAR args[256], *ret, *start, *end;
++    const WCHAR *base;
++    DWORD len;
++
++    if (!app_name || !cmd_line) return NULL;
++    base = wcsrchr( app_name, '\\' );
++    base = base ? base + 1 : app_name;
++    if (wcsicmp( base, L"steamwebhelper.exe" )) return NULL;
++    if (wcsstr( cmd_line, L"--type=" )) return NULL;
++
++    SetLastError( ERROR_SUCCESS );
++    len = GetEnvironmentVariableW( L"BODEGA_STEAMWEBHELPER_ARGS", args, ARRAY_SIZE(args) );
++    if (!len && GetLastError() == ERROR_ENVVAR_NOT_FOUND) lstrcpyW( args, L"--disable-gpu --single-process" );
++    else if (len >= ARRAY_SIZE(args)) return NULL;
++    if (!args[0]) return NULL;
++
++    if (!(ret = RtlAllocateHeap( GetProcessHeap(), 0, (wcslen( cmd_line ) + wcslen( args ) + 2) * sizeof(WCHAR) )))
++        return NULL;
++    lstrcpyW( ret, cmd_line );
++    for (start = args; *start; start = end)
++    {
++        while (*start == ' ') start++;
++        if (!*start) break;
++        for (end = start; *end && *end != ' '; end++) ;
++        if (*end) *end++ = 0;
++        if (wcsstr( ret, start )) continue;
++        lstrcatW( ret, L" " );
++        lstrcatW( ret, start );
++    }
++    FIXME( "HACK: steamwebhelper command line %s\n", debugstr_w(ret) );
++    return ret;
++}
++
+ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR *app_name, WCHAR *cmd_line,
+                                                       SECURITY_ATTRIBUTES *process_attr,
+                                                       SECURITY_ATTRIBUTES *thread_attr,
+@@ -586,6 +625,16 @@
+     info->hThread = info->hProcess = 0;
+     info->dwProcessId = info->dwThreadId = 0;
+ 
++    /* Bodega hack: see bodega_steamwebhelper_cmdline() */
++    {
++        WCHAR *patched = bodega_steamwebhelper_cmdline( app_name, tidy_cmdline );
++        if (patched)
++        {
++            if (tidy_cmdline != cmd_line) HeapFree( GetProcessHeap(), 0, tidy_cmdline );
++            tidy_cmdline = patched;
++        }
++    }
++
+     if (!(params = create_process_params( app_name, tidy_cmdline, cur_dir, env, flags, startup_info )))
+     {
+         status = STATUS_NO_MEMORY;
